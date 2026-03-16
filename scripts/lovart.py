@@ -20,7 +20,6 @@ Usage:
 """
 
 import argparse
-import base64
 import json
 import re
 import time
@@ -81,10 +80,9 @@ def upsert_job(jobs: list[dict], job: dict) -> None:
     jobs.append(job)
 
 
-def new_job(prompt_file: str, prompt_text: str) -> dict:
+def new_job(prompt_file: str) -> dict:
     return {
         "prompt_file": prompt_file,
-        "prompt_text": prompt_text,
         "project_id": None,
         "project_url": None,
         "status": STATUS_PENDING,
@@ -120,87 +118,109 @@ def read_prompt(path: Path) -> str:
 CANVAS_URL = "https://www.lovart.ai/canvas"
 
 CHAT_INPUT_SELECTOR = "[data-testid='agent-message-input']"
-IMAGE_SELECTOR = "img[src*='cdn'], img[src*='blob'], img[src*='output']"
 
 
 def extract_project_id(url: str) -> str | None:
+    # Try query string first (handles ?agent=1&projectId=xxx)
     qs = parse_qs(urlparse(url).query)
-    ids = qs.get("projectId", [])
-    return ids[0] if ids else None
+    if qs.get("projectId"):
+        return qs["projectId"][0]
+    # Fallback: regex scan (handles any URL shape)
+    m = re.search(r"projectId=([a-zA-Z0-9]+)", url)
+    return m.group(1) if m else None
 
 
-def open_canvas(page, project_id: str | None = None) -> str:
-    url = f"{CANVAS_URL}?projectId={project_id}" if project_id else CANVAS_URL
-    print(f"  Opening: {url}", flush=True)
-    page.goto(url, wait_until="domcontentloaded", timeout=30000)
+FILE_SEARCH_BTN = "[data-testid='float-file-search-button']"
+FILE_ITEM_SELECTOR = "[data-testid='agent-file-list-item']"
 
-    for _ in range(60):
-        current = page.evaluate("location.href")
-        pid = extract_project_id(current)
-        if pid:
-            print(f"  Project ID: {pid}", flush=True)
-            return pid
-        time.sleep(1)
+NEW_PROJECT_URL = f"{CANVAS_URL}?newProject=true"
 
-    raise RuntimeError(f"Could not detect projectId in URL after navigation")
+
+def open_page(page, project_id: str | None) -> str | None:
+    """
+    New project: go to /canvas?newProject=true, wait for canvas to load, return projectId.
+    Existing project: go directly to /canvas?projectId=..., return None.
+    """
+    if project_id:
+        url = f"{CANVAS_URL}?projectId={project_id}"
+        print(f"  Resuming project: {url}", flush=True)
+        page.goto(url, wait_until="domcontentloaded", timeout=30000)
+        return None
+    else:
+        print(f"  New project: {NEW_PROJECT_URL}", flush=True)
+        page.goto(NEW_PROJECT_URL, wait_until="domcontentloaded", timeout=30000)
+        print("  Waiting for projectId in URL...", flush=True)
+        page.wait_for_selector(FILE_SEARCH_BTN, timeout=30000)
+        pid = extract_project_id(page.url)
+        if not pid:
+            raise RuntimeError(f"No projectId in URL after canvas loaded: {page.url}")
+        print(f"  Project ID: {pid}", flush=True)
+        return pid
 
 
 def send_prompt(page, prompt_text: str) -> None:
     print("  Waiting for chat input...", flush=True)
     page.wait_for_selector(CHAT_INPUT_SELECTOR, timeout=20000)
     page.locator(CHAT_INPUT_SELECTOR).click()
-    # Lexical rich text editor — must use keyboard.type(), fill() won't work
-    page.keyboard.type(prompt_text)
+    # Lexical editor: Enter = send, Shift+Enter = newline
+    lines = prompt_text.split("\n")
+    for i, line in enumerate(lines):
+        if line:
+            page.keyboard.type(line)
+        if i < len(lines) - 1:
+            page.keyboard.press("Shift+Enter")
     print(f"  Prompt typed ({len(prompt_text)} chars)", flush=True)
     page.keyboard.press("Enter")
     print("  Prompt sent.", flush=True)
 
 
-def wait_and_download_image(page, dest_path: Path, timeout: int = 180) -> bool:
-    """Wait for a generated image and download it to dest_path."""
+def wait_and_download_image(page, dest_path: Path, timeout: int = 300) -> bool:
+    """
+    Poll for agent-file-list-item to appear (indicates generation complete),
+    open the file list panel, grab the last item, trigger download, save to dest_path.
+    """
     IMAGES_DIR.mkdir(parents=True, exist_ok=True)
-    print(f"  Waiting for image (timeout={timeout}s)...", flush=True)
+    print(f"  Waiting for generation (timeout={timeout}s)...", flush=True)
+
+    # Ensure the file list panel is open
+    btn = page.locator(FILE_SEARCH_BTN)
+    btn.click()
+    time.sleep(0.5)
+    # If panel toggled closed, click again to reopen
+    if not page.locator(FILE_ITEM_SELECTOR).count():
+        btn.click()
+        time.sleep(0.5)
 
     deadline = time.time() + timeout
-    seen_srcs: set[str] = set()
-
     while time.time() < deadline:
-        imgs = page.locator(IMAGE_SELECTOR).all()
-        for img in imgs:
-            try:
-                src = img.get_attribute("src") or ""
-                if not src or src in seen_srcs:
-                    continue
-                seen_srcs.add(src)
-                if _download_image(page, src, dest_path):
-                    print(f"  Saved: {dest_path}", flush=True)
-                    return True
-            except Exception:
-                continue
+        items = page.locator(FILE_ITEM_SELECTOR).all()
+        if items:
+            print(f"  {len(items)} file(s) found.", flush=True)
+            break
+        elapsed = int(timeout - (deadline - time.time()))
+        if elapsed % 30 == 0:
+            print(f"  Still waiting... ({elapsed}s)", flush=True)
         time.sleep(2)
-
-    print("  No image found within timeout.", flush=True)
-    return False
-
-
-def _download_image(page, src: str, dest: Path) -> bool:
-    data_b64 = page.evaluate(
-        """async (url) => {
-            const resp = await fetch(url);
-            if (!resp.ok) return null;
-            const buf = await resp.arrayBuffer();
-            const bytes = new Uint8Array(buf);
-            let binary = '';
-            for (let i = 0; i < bytes.byteLength; i++) binary += String.fromCharCode(bytes[i]);
-            return btoa(binary);
-        }""",
-        src,
-    )
-    if not data_b64:
+    else:
+        print("  Timed out waiting for generated files.", flush=True)
         return False
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    dest.write_bytes(base64.b64decode(data_b64))
+
+    # 2. Get the last item
+    last_item = items[-1]
+    filename_text = last_item.locator("div.flex-1 div").first.inner_text().strip()
+    print(f"  Last file: {filename_text}", flush=True)
+
+    # 3. Trigger download and save to controlled path
+    with page.expect_download(timeout=30000) as dl_info:
+        last_item.locator("button").click()
+
+    download = dl_info.value
+    ext = Path(download.suggested_filename).suffix or ".jpeg"
+    final_path = dest_path.with_suffix(ext)
+    download.save_as(final_path)
+    print(f"  Saved: {final_path}", flush=True)
     return True
+
 
 
 # ---------------------------------------------------------------------------
@@ -215,7 +235,7 @@ def run_single(page, prompt_path: Path, jobs: list[dict]) -> dict:
 
     job = find_job(jobs, prompt_file)
     if not job:
-        job = new_job(prompt_file, prompt_text)
+        job = new_job(prompt_file)
         upsert_job(jobs, job)
 
     # Derive image filename from prompt filename
@@ -230,13 +250,15 @@ def run_single(page, prompt_path: Path, jobs: list[dict]) -> dict:
         return job
 
     try:
-        # Open canvas (new project or resume existing)
-        pid = open_canvas(page, job.get("project_id"))
-        current_url = page.evaluate("location.href")
-
-        touch_job(job, project_id=pid, project_url=current_url)
-        upsert_job(jobs, job)
-        save_jobs(jobs)
+        # New project: go to home and send prompt, then capture projectId from URL
+        # Existing project: go directly to canvas
+        project_id = job.get("project_id")
+        result = open_page(page, project_id)
+        if not project_id and result:
+            project_id = result
+            touch_job(job, project_id=project_id, project_url=page.url)
+            upsert_job(jobs, job)
+            save_jobs(jobs)
 
         # Send prompt (skip if already submitted)
         if job["status"] != STATUS_SUBMITTED:
@@ -308,7 +330,7 @@ def main():
                 p = Path(job["prompt_file"])
                 image_path = IMAGES_DIR / f"{p.stem}.png"
                 print(f"\n[{p.stem}] project: {job['project_id']}", flush=True)
-                open_canvas(page, job["project_id"])
+                open_page(page, job["project_id"])
                 ok = wait_and_download_image(page, image_path)
                 if ok:
                     touch_job(job, status=STATUS_DONE, image_path=str(image_path))
@@ -321,7 +343,7 @@ def main():
     print("\n--- Jobs Summary ---", flush=True)
     for j in load_jobs():
         stem = Path(j["prompt_file"]).stem
-        print(f"  {stem:30s}  {j['status']:10s}  {j.get('project_id', '')[:16]}", flush=True)
+        print(f"  {stem:30s}  {j['status']:10s}  {(j.get('project_id') or '')[:16]}", flush=True)
 
 
 if __name__ == "__main__":
