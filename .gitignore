@@ -1,0 +1,7 @@
+# python环境、缓存
+.venv
+__pycache__
+
+
+# 本地认证缓存
+scripts/data/
