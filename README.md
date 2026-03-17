@@ -12,6 +12,7 @@ lovart-skill/
     ├── run.py              # 统一入口，管理环境与依赖
     ├── patchright_auth.py  # 认证模块
     ├── session.py          # 会话客户端
+    ├── lovart.py           # Canvas 自动化主脚本
     └── example.py          # 使用示例
 ```
 
@@ -38,19 +39,47 @@ python scripts/run.py patchright_auth.py
 
 Session 保存在 `scripts/data/auth/lovart.json`，有效期 30 天。
 
-### 2. 运行脚本
+### 2. 运行 Canvas 自动化
 
-```bash
-python scripts/run.py example.py
+准备提示词文件（Markdown 格式）：
+
+```markdown
+# prompt.md 内容示例
+a futuristic city at night, neon lights, cinematic
 ```
 
-每次运行会自动检查 session 是否有效，过期则重新认证。
-
-### 3. 检查依赖
+**单张生成**（自动创建新项目，记录 projectId 到 `jobs.json`）：
 
 ```bash
-python scripts/run.py --check-deps
+python scripts/run.py lovart.py --prompt prompts/01.md
 ```
+
+**无头模式**（不打开浏览器窗口）：
+
+```bash
+python scripts/run.py lovart.py --prompt prompts/01.md --headless
+```
+
+**批量生成**（对文件夹内所有 `.md` 文件各创建一个项目）：
+
+```bash
+python scripts/run.py lovart.py --batch prompts/
+```
+
+**指定图片输出目录**（默认 `scripts/data/images/`）：
+
+```bash
+python scripts/run.py lovart.py --prompt prompts/01.md --output-dir D:\MyImages
+python scripts/run.py lovart.py --batch prompts/ --output-dir D:\MyImages --headless
+```
+
+**补下载**（对所有 `submitted` 状态的任务重新下载图片）：
+
+```bash
+python scripts/run.py lovart.py --download-all
+```
+
+每个提示词文件对应一个 Lovart 项目，任务状态记录在 `scripts/data/jobs.json`，支持断点续跑。
 
 ## 编写自动化脚本
 

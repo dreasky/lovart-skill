@@ -5,3 +5,7 @@ __pycache__
 
 # 本地认证缓存
 scripts/data/
+.claude
+
+# 临时忽略
+imgs_text

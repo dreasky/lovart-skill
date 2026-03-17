@@ -62,7 +62,7 @@ class LovartSession:
 
         self._browser_cm = Camoufox(headless=self.headless)
         browser = self._browser_cm.__enter__()
-        self._context = browser.new_context()
+        self._context = browser.new_context(viewport={"width": 600, "height": 600})
 
         # Restore cookies from saved session
         cookies = state.get("cookies", [])
