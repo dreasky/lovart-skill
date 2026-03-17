@@ -18,6 +18,12 @@ lovart-skill/
 
 ## 快速开始
 
+### skill安装
+
+```bash
+npx skills add https://github.com/dreasky/lovart-skill --skill lovart-skill
+```
+
 ### 1. 认证
 
 首次使用需要登录 Lovart.ai，获取并保存 session：
@@ -27,11 +33,13 @@ python scripts/run.py patchright_auth.py
 ```
 
 脚本会自动：
+
 - 创建虚拟环境并安装依赖
 - 下载 Camoufox Firefox 浏览器
 - 打开浏览器，等待手动完成登录
 
 登录步骤：
+
 1. 点击「开始体验」
 2. 输入邮箱 + 密码
 3. 输入邮件验证码
