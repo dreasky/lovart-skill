@@ -42,7 +42,7 @@ Session 保存在 `scripts/data/auth/lovart.json`，有效期 30 天。
 | 命令 | 说明 | 参数 |
 | ---- | ---- | ---- |
 | `lovart.py --prompt` | 单张生成 | `--prompt <file>` (必填) `--output-dir` (可选) `--headless` (可选) |
-| `lovart.py --batch` | 批量生成 | `--batch <dir>` (必填) `--output-dir` (可选) `--headless` (可选) |
+| `lovart.py --batch` | 批量生成（串行提交，并行等待生图） | `--batch <dir>` (必填) `--output-dir` (可选) `--headless` (可选) |
 | `lovart.py --download-all` | 补下载 | 无 |
 
 ```bash
@@ -52,7 +52,7 @@ python scripts/run.py lovart.py --prompt prompts/01.md
 # 无头模式（不打开浏览器窗口）
 python scripts/run.py lovart.py --prompt prompts/01.md --headless
 
-# 批量生成（对文件夹内所有 .md 文件各创建一个项目）
+# 批量生成（串行提交所有提示词，然后并行等待生图）
 python scripts/run.py lovart.py --batch prompts/
 
 # 指定图片输出目录

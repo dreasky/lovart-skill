@@ -77,6 +77,10 @@ class LovartSession:
         if hasattr(self, "_browser_cm"):
             self._browser_cm.__exit__(None, None, None)
 
+    def new_page(self):
+        """Create and return a new page from the shared browser context."""
+        return self._context.new_page()
+
     def is_logged_in(self) -> bool:
         """Navigate to home and check if session is still valid."""
         try:

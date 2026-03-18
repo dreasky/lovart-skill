@@ -68,14 +68,21 @@ def save_jobs(jobs: list[dict]) -> None:
 
 def find_job(jobs: list[dict], prompt_file: str) -> dict | None:
     for j in jobs:
-        if j["prompt_file"] == prompt_file:
+        if (
+            j["prompt_file"] == prompt_file
+            or Path(j["prompt_file"]).stem == Path(prompt_file).stem
+        ):
             return j
     return None
 
 
 def upsert_job(jobs: list[dict], job: dict) -> None:
+    stem = Path(job["prompt_file"]).stem
     for i, j in enumerate(jobs):
-        if j["prompt_file"] == job["prompt_file"]:
+        if (
+            j["prompt_file"] == job["prompt_file"]
+            or Path(j["prompt_file"]).stem == stem
+        ):
             jobs[i] = job
             return
     jobs.append(job)
@@ -133,6 +140,9 @@ def extract_project_id(url: str) -> str | None:
 
 NEW_PROJECT_URL = f"{CANVAS_URL}?newProject=true"
 
+DOWNLOAD_BASE = "https://download.lovart.ai/artifacts/agent/"
+IMAGE_CARD_SELECTOR = "[data-testid='image-generation-card']"
+
 
 PROJECT_NAME_INPUT = "input#LoTextInput"
 
@@ -147,7 +157,9 @@ def set_project_name(page, name: str) -> None:
         )
         inp.dispatch_event("input")
         inp.dispatch_event("change")
-        inp.blur()
+        inp.click()
+        inp.press("Tab")
+        page.wait_for_timeout(500)  # let save request fire
         print(f"  Project name set: {name}", flush=True)
     except Exception as e:
         print(f"  set_project_name: {e}", flush=True)
@@ -176,8 +188,7 @@ def open_page(
         if not pid:
             raise RuntimeError(f"No projectId in URL after canvas loaded: {page.url}")
         print(f"  Project ID: {pid}", flush=True)
-        if project_name:
-            set_project_name(page, project_name)
+
         return pid
 
 
@@ -204,7 +215,7 @@ def dismiss_dialog(page) -> None:
 
 
 def send_prompt(page, prompt_text: str) -> None:
-    dismiss_dialog(page)
+
     print("  Waiting for chat input...", flush=True)
     page.wait_for_selector(CHAT_INPUT_SELECTOR, timeout=20000)
     page.locator(CHAT_INPUT_SELECTOR).click()
@@ -237,49 +248,16 @@ def send_prompt(page, prompt_text: str) -> None:
     print("  Prompt sent.", flush=True)
 
 
-DOWNLOAD_BASE = "https://download.lovart.ai/artifacts/agent/"
-IMAGE_CARD_SELECTOR = "[data-testid='image-generation-card']"
-
-
-def wait_and_download_image(page, dest_path: Path, timeout: int = 300) -> bool:
-    """
-    Wait for image-generation-card, extract image filename from img src,
-    construct download URL and fetch directly.
-    """
-    IMAGES_DIR.mkdir(parents=True, exist_ok=True)
-    print(f"  Waiting for image generation (timeout={timeout}s)...", flush=True)
-
-    try:
-        page.wait_for_selector(IMAGE_CARD_SELECTOR, timeout=timeout * 1000)
-    except Exception:
-        print("  Timed out waiting for image-generation-card.", flush=True)
-        return False
-
-    cards = page.locator(IMAGE_CARD_SELECTOR).all()
-    last_card = cards[-1]
-    print(
-        f"  Image card found ({len(cards)} total), waiting for img src...", flush=True
-    )
-
-    # Wait until the img src contains the artifact URL (generation complete)
-    img_locator = last_card.locator("img[src*='/artifacts/agent/']").first
-    img_locator.wait_for(timeout=300000)
-
-    # Extract image filename from img src, e.g. aOVGV3fdZaKHiUdJ.png
-    src = img_locator.get_attribute("src") or ""
+def _do_download(page, src: str, dest_path: Path) -> Path:
+    """Extract filename from img src, fetch via page context, write to disk. Returns final path."""
     m = re.search(r"/artifacts/agent/([^?]+)", src)
     if not m:
-        print(f"  Could not extract image filename from src: {src}", flush=True)
-        return False
-
-    filename = m.group(1)  # e.g. aOVGV3fdZaKHiUdJ.png
+        raise ValueError(f"Could not extract filename from src: {src}")
+    filename = m.group(1)
     download_url = f"{DOWNLOAD_BASE}{filename}"
     ext = Path(filename).suffix or ".png"
     final_path = dest_path.with_suffix(ext)
-
-    print(f"  Downloading: {download_url}", flush=True)
-    # Firefox Xray restrictions prevent TypedArray manipulation across origins.
-    # Use FileReader API to convert blob to base64 entirely within page context.
+    IMAGES_DIR.mkdir(parents=True, exist_ok=True)
     data_b64 = page.evaluate(
         """async (url) => {
             const resp = await fetch(url);
@@ -296,7 +274,56 @@ def wait_and_download_image(page, dest_path: Path, timeout: int = 300) -> bool:
     )
     final_path.write_bytes(base64.b64decode(data_b64))
     print(f"  Saved: {final_path}", flush=True)
-    return True
+    return final_path
+
+
+def try_download_image(page, dest_path: Path) -> Path | None:
+    """
+    Non-blocking check: if image card with artifact src is present, download and return path.
+    Returns None if image is not ready yet.
+    """
+    cards = page.locator(IMAGE_CARD_SELECTOR).all()
+    if not cards:
+        return None
+    img = cards[-1].locator("img[src*='/artifacts/agent/']").first
+    if img.count() == 0:
+        return None
+    src = img.get_attribute("src") or ""
+    if not src:
+        return None
+    return _do_download(page, src, dest_path)
+
+
+def wait_and_download_image(page, dest_path: Path, timeout: int = 300) -> bool:
+    """
+    Blocking wait for image-generation-card, then download.
+    Used by single-job mode.
+    """
+    IMAGES_DIR.mkdir(parents=True, exist_ok=True)
+    print(f"  Waiting for image generation (timeout={timeout}s)...", flush=True)
+
+    try:
+        page.wait_for_selector(IMAGE_CARD_SELECTOR, timeout=timeout * 1000)
+    except Exception:
+        print("  Timed out waiting for image-generation-card.", flush=True)
+        return False
+
+    cards = page.locator(IMAGE_CARD_SELECTOR).all()
+    last_card = cards[-1]
+    print(
+        f"  Image card found ({len(cards)} total), waiting for img src...", flush=True
+    )
+
+    img_locator = last_card.locator("img[src*='/artifacts/agent/']").first
+    img_locator.wait_for(timeout=300000)
+
+    src = img_locator.get_attribute("src") or ""
+    try:
+        _do_download(page, src, dest_path)
+        return True
+    except Exception as e:
+        print(f"  Download error: {e}", flush=True)
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -304,68 +331,107 @@ def wait_and_download_image(page, dest_path: Path, timeout: int = 300) -> bool:
 # ---------------------------------------------------------------------------
 
 
-def run_single(
-    page, prompt_path: Path, jobs: list[dict], images_dir: Path = IMAGES_DIR
-) -> dict:
-    """Run one prompt → project → image job. Updates and returns the job."""
-    prompt_file = str(prompt_path)
+def submit_job(
+    page, prompt_path: Path, jobs: list[dict], images_dir: Path
+) -> tuple[dict, Path]:
+    """
+    Phase 1 (serial): open project, send prompt, mark submitted.
+    Returns (job, image_path). Does NOT wait for image generation.
+    """
+    prompt_file = str(prompt_path.resolve())
     prompt_text = read_prompt(prompt_path)
+    stem = prompt_path.stem
+    image_path = images_dir.resolve() / f"{stem}.png"
 
     job = find_job(jobs, prompt_file)
     if not job:
         job = new_job(prompt_file)
-        upsert_job(jobs, job)
+    else:
+        # Normalize stored path to absolute
+        job["prompt_file"] = prompt_file
+        if job.get("image_path"):
+            job["image_path"] = str(Path(job["image_path"]).resolve())
+    upsert_job(jobs, job)
 
-    # Derive image filename from prompt filename
-    stem = prompt_path.stem
-    image_path = images_dir / f"{stem}.png"
+    print(f"\n[{stem}] submitting...", flush=True)
 
-    print(f"\n[{stem}]", flush=True)
-
-    # Skip if already done
     if job["status"] == STATUS_DONE and image_path.exists():
-        print("  Already done, skipping.", flush=True)
-        return job
+        print(f"  [{stem}] already done, skipping.", flush=True)
+        return job, image_path
 
     try:
-        # New project: go to home and send prompt, then capture projectId from URL
-        # Existing project: go directly to canvas
         project_id = job.get("project_id")
-        result = open_page(
-            page, project_id, project_name=stem if not project_id else None
-        )
+        result = open_page(page, project_id)
+
         if not project_id and result:
             project_id = result
             touch_job(job, project_id=project_id, project_url=page.url)
             upsert_job(jobs, job)
             save_jobs(jobs)
 
-        # Send prompt — skip if image already generated or already submitted
-        if job["status"] != STATUS_SUBMITTED:
-            if page.locator(IMAGE_CARD_SELECTOR).count():
-                print("  Image card already present, skipping prompt.", flush=True)
-                touch_job(job, status=STATUS_SUBMITTED)
-                upsert_job(jobs, job)
-                save_jobs(jobs)
-            else:
-                send_prompt(page, prompt_text)
-                touch_job(job, status=STATUS_SUBMITTED)
-                upsert_job(jobs, job)
-                save_jobs(jobs)
+        # Check if image already generated (handles failed jobs that actually completed)
+        # Wait briefly for page to render before checking — avoids false negatives on slow loads
+        if project_id:
+            page.wait_for_timeout(5000)
 
-        # Download image
+        # 关闭弹窗
+        dismiss_dialog(page)
+
+        existing = try_download_image(page, image_path)
+        if existing:
+            print(f"  [{stem}] image already present, downloading.", flush=True)
+            touch_job(job, status=STATUS_DONE, image_path=str(existing))
+            upsert_job(jobs, job)
+            save_jobs(jobs)
+            return job, image_path
+
+        # Send prompt if not yet submitted
+        if job["status"] != STATUS_SUBMITTED:
+
+            # 设置项目名称
+            set_project_name(page, stem)
+
+            # 发送消息
+            send_prompt(page, prompt_text)
+            # Check for paywall immediately after sending — insufficient credits
+            page.wait_for_timeout(2000)
+            if page.locator("[data-testid='paywall-container']").count():
+                print(
+                    f"  [{stem}] paywall detected — insufficient credits, marking failed.",
+                    flush=True,
+                )
+                touch_job(job, status=STATUS_FAILED)
+                upsert_job(jobs, job)
+                save_jobs(jobs)
+                return job, image_path
+        else:
+            print(f"  [{stem}] already submitted, will wait for image.", flush=True)
+        touch_job(job, status=STATUS_SUBMITTED)
+        upsert_job(jobs, job)
+        save_jobs(jobs)
+
+    except Exception as e:
+        print(f"  [{stem}] submit error: {e}", flush=True)
+        touch_job(job, status=STATUS_FAILED)
+        upsert_job(jobs, job)
+        save_jobs(jobs)
+
+    return job, image_path
+
+
+def run_single(
+    page, prompt_path: Path, jobs: list[dict], images_dir: Path = IMAGES_DIR
+) -> dict:
+    """Run one prompt → project → image job. Updates and returns the job."""
+    job, image_path = submit_job(page, prompt_path, jobs, images_dir)
+    if job["status"] not in (STATUS_DONE, STATUS_FAILED):
         ok = wait_and_download_image(page, image_path)
         if ok:
             touch_job(job, status=STATUS_DONE, image_path=str(image_path))
         else:
             touch_job(job, status=STATUS_FAILED)
-
-    except Exception as e:
-        print(f"  Error: {e}", flush=True)
-        touch_job(job, status=STATUS_FAILED)
-
-    upsert_job(jobs, job)
-    save_jobs(jobs)
+        upsert_job(jobs, job)
+        save_jobs(jobs)
     return job
 
 
@@ -398,14 +464,12 @@ def main():
             print("Session expired. Please re-authenticate.")
             return
 
-        page = session.page
-
         if args.prompt:
             p = Path(args.prompt)
             if not p.exists():
                 print(f"File not found: {p}")
                 return
-            run_single(page, p, jobs, images_dir)
+            run_single(session.page, p, jobs, images_dir)
 
         elif args.batch:
             folder = Path(args.batch)
@@ -413,9 +477,97 @@ def main():
             if not md_files:
                 print(f"No .md files found in {folder}")
                 return
-            print(f"Batch: {len(md_files)} prompts", flush=True)
+            print(
+                f"Batch: {len(md_files)} prompts — serial submit, parallel download",
+                flush=True,
+            )
+
+            # Phase 1: serial submit — create projects and send prompts one by one
+            submitted: list[tuple[dict, Path, object]] = []  # (job, image_path, page)
             for p in md_files:
-                run_single(page, p, jobs, images_dir)
+                prompt_file = str(p.resolve())
+                image_path = images_dir.resolve() / f"{p.stem}.png"
+                existing = find_job(jobs, prompt_file)
+                if (
+                    existing
+                    and existing["status"] == STATUS_DONE
+                    and image_path.exists()
+                ):
+                    print(f"\n[{p.stem}] already done, skipping.", flush=True)
+                    # Normalize path in-place and persist
+                    existing["prompt_file"] = prompt_file
+                    if existing.get("image_path"):
+                        existing["image_path"] = str(
+                            Path(existing["image_path"]).resolve()
+                        )
+                    upsert_job(jobs, existing)
+                    continue
+                page = session.new_page()
+                job, image_path = submit_job(page, p, jobs, images_dir)
+                if job["status"] in (STATUS_DONE, STATUS_FAILED):
+                    page.close()
+                else:
+                    submitted.append((job, image_path, page))
+
+            # Phase 2: single-threaded polling — check all pages in turn until all done
+            POLL_INTERVAL = 10  # seconds between rounds
+            POLL_TIMEOUT = 360  # 6 min max per job
+            deadline = time.time() + POLL_TIMEOUT
+            pending = list(submitted)  # [(job, image_path, page), ...]
+
+            print(
+                f"\nAll prompts submitted. Polling {len(pending)} job(s) for images...",
+                flush=True,
+            )
+
+            while pending and time.time() < deadline:
+                still_pending = []
+                for job, image_path, page in pending:
+                    stem = Path(job["prompt_file"]).stem
+                    try:
+                        final_path = try_download_image(page, image_path)
+                        if final_path:
+                            touch_job(
+                                job, status=STATUS_DONE, image_path=str(final_path)
+                            )
+                            upsert_job(jobs, job)
+                            save_jobs(jobs)
+                            print(f"  [{stem}] done.", flush=True)
+                            try:
+                                page.close()
+                            except Exception:
+                                pass
+                        else:
+                            still_pending.append((job, image_path, page))
+                    except Exception as e:
+                        print(f"  [{stem}] error: {e}", flush=True)
+                        touch_job(job, status=STATUS_FAILED)
+                        upsert_job(jobs, job)
+                        save_jobs(jobs)
+                        try:
+                            page.close()
+                        except Exception:
+                            pass
+
+                pending = still_pending
+                if pending:
+                    print(
+                        f"  {len(pending)} job(s) still generating, next check in {POLL_INTERVAL}s...",
+                        flush=True,
+                    )
+                    time.sleep(POLL_INTERVAL)
+
+            # Mark timed-out jobs as failed
+            for job, image_path, page in pending:
+                stem = Path(job["prompt_file"]).stem
+                print(f"  [{stem}] timed out.", flush=True)
+                touch_job(job, status=STATUS_FAILED)
+                upsert_job(jobs, job)
+                save_jobs(jobs)
+                try:
+                    page.close()
+                except Exception:
+                    pass
 
         elif args.download_all:
             pending = [
@@ -428,10 +580,10 @@ def main():
             )
             for job in pending:
                 p = Path(job["prompt_file"])
-                image_path = images_dir / f"{p.stem}.png"
+                image_path = images_dir.resolve() / f"{p.stem}.png"
                 print(f"\n[{p.stem}] project: {job['project_id']}", flush=True)
-                open_page(page, job["project_id"])
-                ok = wait_and_download_image(page, image_path)
+                open_page(session.page, job["project_id"])
+                ok = wait_and_download_image(session.page, image_path)
                 if ok:
                     touch_job(job, status=STATUS_DONE, image_path=str(image_path))
                 else:

@@ -68,11 +68,16 @@ python scripts/run.py lovart.py --prompt prompts/01.md
 python scripts/run.py lovart.py --prompt prompts/01.md --headless
 ```
 
-**批量生成**（对文件夹内所有 `.md` 文件各创建一个项目）：
+**批量生成**（串行提交所有提示词，再并行等待生图完成）：
 
 ```bash
 python scripts/run.py lovart.py --batch prompts/
 ```
+
+批量模式流程：
+1. 串行依次为每个 `.md` 文件创建项目并发送提示词
+2. 全部提交后，轮询所有项目页面，图片就绪即下载
+3. 已完成（`done`）的任务自动跳过；失败任务重入时先检测是否已有图片，有则直接下载
 
 **指定图片输出目录**（默认 `scripts/data/images/`）：
 
