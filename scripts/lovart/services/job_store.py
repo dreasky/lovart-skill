@@ -3,6 +3,7 @@ Job persistence store using Repository pattern.
 """
 
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -71,3 +72,20 @@ class JobStore:
             for job in self._jobs
             if job.status == JobStatus.SUBMITTED and job.project_id
         ]
+
+    def find_failed(self) -> list[Job]:
+        """Find all failed jobs."""
+        return [job for job in self._jobs if job.status == JobStatus.FAILED]
+
+    def reset_failed(self) -> int:
+        """Reset all failed jobs to pending. Returns count of reset jobs."""
+        count = 0
+        for job in self._jobs:
+            if job.status == JobStatus.FAILED:
+                job.status = JobStatus.PENDING
+                job.error = None
+                job.updated_at = datetime.now(timezone.utc).isoformat()
+                count += 1
+        if count > 0:
+            self.save()
+        return count

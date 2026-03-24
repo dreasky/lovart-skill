@@ -3,8 +3,8 @@ Browser session management.
 """
 
 from pathlib import Path
-from typing import Optional
-
+from typing import Optional, cast
+from playwright.sync_api import Browser
 from ..auth import AuthState, AuthStore, Authenticator
 
 
@@ -30,7 +30,10 @@ class LovartSession:
     ):
         self.headless = headless
         self.reauth_if_needed = reauth_if_needed
-        self._auth_file = auth_file or Path(__file__).parent.parent.parent / "data" / "auth" / "lovart.json"
+        self._auth_file = (
+            auth_file
+            or Path(__file__).parent.parent.parent / "data" / "auth" / "lovart.json"
+        )
         self._browser_cm = None
         self._context = None
         self.page = None
@@ -58,10 +61,13 @@ class LovartSession:
                 raise RuntimeError("Authentication failed.")
 
         if not state:
-            raise RuntimeError(f"No auth session found at {self._auth_file}. Run patchright_auth.py first.")
+            raise RuntimeError(
+                f"No auth session found at {self._auth_file}. Run patchright_auth.py first."
+            )
 
         self._browser_cm = Camoufox(headless=self.headless)
-        browser = self._browser_cm.__enter__()
+        browser: Browser = cast(Browser, self._browser_cm.__enter__())
+        # browser = self._browser_cm.__enter__()
         self._context = browser.new_context(viewport={"width": 600, "height": 600})
 
         # Restore cookies from saved session

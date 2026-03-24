@@ -1,19 +1,29 @@
 """
 Canvas page operations service.
+
+This service handles page-level interactions only.
+For image downloading, use ImageDownloader.
 """
 
-import base64
 import re
 from pathlib import Path
 from typing import Optional
 from urllib.parse import parse_qs, urlparse
 
 from ..config import Config
-from ..models import Job, JobStatus
 
 
 class CanvasService:
-    """Service for interacting with Lovart canvas pages."""
+    """
+    Service for interacting with Lovart canvas pages.
+
+    Responsibilities:
+    - Page navigation (open project)
+    - Dialog handling
+    - Project name setting
+    - Prompt sending
+    - Generation state checking
+    """
 
     def __init__(self, page):
         self.page = page
@@ -142,85 +152,6 @@ class CanvasService:
         print("  Prompt sent.", flush=True)
 
     # -----------------------------------------------------------------------
-    # Image Download
-    # -----------------------------------------------------------------------
-
-    def try_download_image(self, dest_path: Path) -> Optional[Path]:
-        """
-        Non-blocking check: download image if ready.
-        Returns path if downloaded, None if not ready.
-        """
-        cards = self.page.locator(Config.IMAGE_CARD_SELECTOR).all()
-        if not cards:
-            return None
-        img = cards[-1].locator("img[src*='/artifacts/agent/']").first
-        if img.count() == 0:
-            return None
-        src = img.get_attribute("src") or ""
-        if not src:
-            return None
-        return self._do_download(src, dest_path)
-
-    def wait_and_download(self, dest_path: Path, timeout: int = None) -> bool:
-        """
-        Blocking wait for image, then download.
-        Returns True if successful.
-        """
-        timeout = timeout or Config.IMAGE_WAIT_TIMEOUT
-        Config.IMAGES_DIR.mkdir(parents=True, exist_ok=True)
-        print(f"  Waiting for image generation (timeout={timeout}s)...", flush=True)
-
-        try:
-            self.page.wait_for_selector(Config.IMAGE_CARD_SELECTOR, timeout=timeout * 1000)
-        except Exception:
-            print("  Timed out waiting for image-generation-card.", flush=True)
-            return False
-
-        cards = self.page.locator(Config.IMAGE_CARD_SELECTOR).all()
-        last_card = cards[-1]
-        print(f"  Image card found ({len(cards)} total), waiting for img src...", flush=True)
-
-        img_locator = last_card.locator("img[src*='/artifacts/agent/']").first
-        img_locator.wait_for(timeout=300000)
-
-        src = img_locator.get_attribute("src") or ""
-        try:
-            self._do_download(src, dest_path)
-            return True
-        except Exception as e:
-            print(f"  Download error: {e}", flush=True)
-            return False
-
-    def _do_download(self, src: str, dest_path: Path) -> Path:
-        """Download image from src URL to dest_path."""
-        m = re.search(r"/artifacts/agent/([^?]+)", src)
-        if not m:
-            raise ValueError(f"Could not extract filename from src: {src}")
-        filename = m.group(1)
-        download_url = f"{Config.DOWNLOAD_BASE}{filename}"
-        ext = Path(filename).suffix or ".png"
-        final_path = dest_path.with_suffix(ext)
-        Config.IMAGES_DIR.mkdir(parents=True, exist_ok=True)
-
-        data_b64 = self.page.evaluate(
-            """async (url) => {
-                const resp = await fetch(url);
-                if (!resp.ok) throw new Error('HTTP ' + resp.status);
-                const blob = await resp.blob();
-                return await new Promise((resolve, reject) => {
-                    const reader = new FileReader();
-                    reader.onload = () => resolve(reader.result.split(',')[1]);
-                    reader.onerror = reject;
-                    reader.readAsDataURL(blob);
-                });
-            }""",
-            download_url,
-        )
-        final_path.write_bytes(base64.b64decode(data_b64))
-        print(f"  Saved: {final_path}", flush=True)
-        return final_path
-
-    # -----------------------------------------------------------------------
     # Paywall Check
     # -----------------------------------------------------------------------
 
@@ -234,8 +165,8 @@ class CanvasService:
 
     def is_generating(self) -> bool:
         """Check if image is currently being generated."""
-        # Look for loading/generating indicators
         loading_selectors = [
+            Config.IMAGE_GENERATING,
             "[data-testid='image-generation-loading']",
             ".generating",
             "[class*='loading']",
@@ -246,7 +177,21 @@ class CanvasService:
                 return True
         return False
 
-    def wait_for_current_generation(self, timeout: int = 300) -> bool:
+    def wait_for_generation_start(self, timeout: int = 30) -> bool:
+        """
+        Wait for image generation to start (IMAGE_GENERATING element appears).
+        Returns True if generation started, False if timed out.
+        """
+        print("  Waiting for generation to start...", flush=True)
+        try:
+            self.page.wait_for_selector(Config.IMAGE_GENERATING, timeout=timeout * 1000)
+            print("  Generation started.", flush=True)
+            return True
+        except Exception as e:
+            print(f"  wait_for_generation_start timeout: {e}", flush=True)
+            return False
+
+    def wait_for_generation_complete(self, timeout: int = 300) -> bool:
         """
         Wait for current generation to complete (if any).
         Returns True if generation completed (or no generation in progress).
@@ -256,9 +201,8 @@ class CanvasService:
 
         print("  Image generating, waiting for completion...", flush=True)
         try:
-            # Wait for loading indicators to disappear
             self.page.wait_for_selector(
-                "[data-testid='image-generation-loading']",
+                Config.IMAGE_GENERATING,
                 state="hidden",
                 timeout=timeout * 1000,
             )

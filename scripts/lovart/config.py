@@ -24,6 +24,8 @@ class Config:
     IMAGE_CARD_SELECTOR: str = "[data-testid='image-generation-card']"
     PROJECT_NAME_INPUT: str = "input#LoTextInput"
 
+    IMAGE_GENERATING: str = "[data-testid='agent-image-loading-placeholder']"
+
     # Timeouts
     PAGE_LOAD_TIMEOUT: int = 30000
     CHAT_INPUT_TIMEOUT: int = 20000
